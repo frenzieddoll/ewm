@@ -71,6 +71,13 @@ or (key . KEYCODE).")
 (defun ewm-text-input-forward-key-module (_surface-id keycode &rest _mods)
   (push (cons 'key keycode) ewm-skk-tests--sent))
 (defun ewm-get-focused-id () ewm-skk-tests--focused-id)
+(defun ewm-send-key-module (_surface-id keys)
+  (push (cons 'send (mapcar (lambda (k) (plist-get k :key)) keys))
+        ewm-skk-tests--sent))
+(defvar ewm-skk-tests--intercepts nil "Key descriptions last sent to intercept.")
+(defun ewm-intercept-keys-module (specs)
+  (setq ewm-skk-tests--intercepts
+        (mapcar (lambda (spec) (plist-get spec :description)) specs)))
 
 (require 'ewm-skk)
 
@@ -88,6 +95,9 @@ or (key . KEYCODE).")
            (ewm-text-input-key-functions nil)
            (ewm-text-input-surface-composer-functions nil)
            (ewm-text-input-deactivate-hook nil)
+           (ewm-intercept-keys-filter-functions nil)
+           (ewm-skk--converting nil)
+           (ewm-skk-tests--intercepts nil)
            (unread-command-events nil)
            (inhibit-message t)
            (surface (generate-new-buffer " *ewm-skk-surface*")))
@@ -134,6 +144,18 @@ or (key . KEYCODE).")
   "Committed text in order."
   (mapcar #'cdr (seq-filter (lambda (s) (eq (car s) 'commit))
                             (reverse ewm-skk-tests--sent))))
+
+(defun ewm-skk-tests--sends ()
+  "Keys sent as emulations, in order."
+  (mapcar #'cdr (seq-filter (lambda (s) (eq (car s) 'send))
+                            (reverse ewm-skk-tests--sent))))
+
+(defun ewm-skk-tests--emulate (surface)
+  "Give SURFACE emulations like an Emacs-keys setup."
+  (with-current-buffer surface
+    (setq-local ewm-surface-emulate-keys
+                '(("C-m" . "<return>") ("C-g" . "<escape>")
+                  ("C-h" . "<backspace>") ("C-f" . "<right>")))))
 
 (defun ewm-skk-tests--keys ()
   "Keycodes forwarded raw, in order."
@@ -371,6 +393,84 @@ or (key . KEYCODE).")
         (with-current-buffer surface (skk-mode -1))
         (should-not (car intercepts))))
     (ewm-text-input-mode -1)))
+
+(ert-deftest ewm-skk-tests/emulated-keys-act-on-the-conversion ()
+  "Mid-conversion, a key keeps its DDSKK meaning, else takes what it emulates."
+  (ewm-skk-tests--with-surface
+    (ewm-skk-tests--emulate surface)
+    (let ((skk-egg-like-newline t))
+      ;; C-m is newline to DDSKK: it confirms, with no Return to the client.
+      (ewm-skk-tests--type "Nihonn " ?\C-m)
+      (should (equal (ewm-skk-tests--commits) '("日本")))
+      (should-not (ewm-skk-tests--sends))
+      ;; C-g cancels the candidate instead of sending Escape.
+      (ewm-skk-tests--type "Nihonn " ?\C-g)
+      (should (equal (ewm-skk-tests--preedit) "▽にほん"))
+      ;; C-h has no DDSKK meaning, so it acts as the Backspace it emulates.
+      (ewm-skk-tests--type ?\C-h)
+      (should (equal (ewm-skk-tests--preedit) "▽にほ"))
+      ;; C-f means nothing to DDSKK: confirm, then send its Right.
+      (ewm-skk-tests--type ?\C-f)
+      (should (equal (ewm-skk-tests--commits) '("日本" "にほ")))
+      (should (equal (ewm-skk-tests--sends) '(("right"))))
+      (should-not (ewm-skk-tests--keys))
+      (should (ewm-skk-tests--clean surface)))))
+
+(ert-deftest ewm-skk-tests/emulated-return-types-return ()
+  "A newline from C-m reaches the client as the Return C-m emulates."
+  (ewm-skk-tests--with-surface
+    (ewm-skk-tests--emulate surface)
+    (ewm-skk-tests--type "Nihonn " ?\C-m)
+    (should (equal (ewm-skk-tests--commits) '("日本")))
+    (should (equal (ewm-skk-tests--sends) '(("return"))))
+    (should-not (ewm-skk-tests--keys))))
+
+(ert-deftest ewm-skk-tests/conversion-lifts-intercepted-keys ()
+  "While ▽/▼ is open, emulations and DDSKK's EWM keys reach Emacs as text input."
+  (ewm-skk-tests--with-surface
+    (ewm-skk-tests--emulate surface)
+    (let ((ewm--module-mode t)
+          (ewm-mode-map (make-sparse-keymap)))
+      (keymap-set ewm-mode-map "C-j" #'skk-kakutei)
+      (keymap-set ewm-mode-map "s-o" #'switch-to-buffer)
+      (ewm-skk-tests--type "ka")
+      (should-not ewm-skk-tests--intercepts)
+      (ewm-skk-tests--type "Ni")
+      (should (equal ewm-skk-tests--intercepts '("s-o")))
+      (ewm-skk-tests--type "honn" ?\s)
+      (should (equal (ewm-skk-tests--preedit) "▼日本"))
+      (should (equal ewm-skk-tests--intercepts '("s-o")))
+      (ewm-skk-tests--type ?\C-j)
+      (should (member "RET" ewm-skk-tests--intercepts))
+      (should (member "C-j" ewm-skk-tests--intercepts))
+      (should (member "s-o" ewm-skk-tests--intercepts))
+      ;; A field going away mid-conversion restores them too.
+      (ewm-skk-tests--type "Ni")
+      (should (equal ewm-skk-tests--intercepts '("s-o")))
+      (ewm--handle-text-input-deactivated)
+      (should (member "C-j" ewm-skk-tests--intercepts)))))
+
+(ert-deftest ewm-skk-tests/registration-clears-the-preedit-first ()
+  "Registering a word clears the client's preedit before the minibuffer
+takes the focus, so the client cannot keep the reading as text."
+  (ewm-skk-tests--with-surface
+    (let ((depth 0) seen)
+      (cl-letf (((symbol-function 'minibuffer-depth) (lambda () depth))
+                ((symbol-function 'read-from-minibuffer)
+                 (lambda (&rest _)
+                   (setq depth 1)
+                   (run-hooks 'minibuffer-setup-hook)
+                   (setq seen (ewm-skk-tests--preedit))
+                   ;; Focus moves to the minibuffer.
+                   (ewm--handle-text-input-deactivated)
+                   ;; Redisplay while registering must not bring it back.
+                   (run-hook-with-args 'pre-redisplay-functions nil)
+                   (setq depth 0)
+                   "日本語")))
+        (ewm-skk-tests--type "Nihongo" ?\s))
+      (should (equal seen ""))
+      (should (equal (ewm-skk-tests--commits) '("日本語")))
+      (should (equal (ewm-skk-tests--preedit) "")))))
 
 (provide 'ewm-skk-tests)
 ;;; ewm-skk-tests.el ends here

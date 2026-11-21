@@ -22,6 +22,12 @@
 ;; to the client untouched, so Return, Backspace and shortcuts behave as
 ;; before when no conversion is under way.
 ;;
+;; The compositor emulates `ewm-surface-emulate-keys' and runs `ewm-mode-map'
+;; keys before text input sees them, so C-m as Return would let the client
+;; take its preedit as typed text.  While ▽/▼ is open the focused surface's
+;; emulations, and `ewm-mode-map' keys bound to DDSKK commands, are not
+;; intercepted; emulations are then applied here instead.
+;;
 ;; Usage:
 ;;   (require 'ewm-skk)
 ;;   (ewm-skk-mode 1)
@@ -29,7 +35,9 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'ewm-text-input)
+(require 'ewm-input)
 
 (defvar skk-mode)
 (defvar skk-henkan-mode)
@@ -72,6 +80,12 @@ then goes to the client."
 
 (defvar ewm-skk--running nil
   "Surface buffer DDSKK is running a key in, else nil.")
+
+(defvar ewm-skk--depth 0
+  "Minibuffer depth when DDSKK started the running key.")
+
+(defvar ewm-skk--converting nil
+  "Surface buffer in ▽/▼ whose intercepted keys are lifted, else nil.")
 
 ;;; State
 
@@ -117,9 +131,16 @@ then goes to the client."
 
 ;;; Talking to the client
 
-(defun ewm-skk--return-p (raw)
-  "Non-nil when compositor key RAW is Return."
-  (memq (alist-get 'keysym raw) '(#xff0d #xff8d)))
+(defun ewm-skk--emulation (key)
+  "Keys the current surface's `ewm-surface-emulate-keys' sends for KEY, or nil."
+  (cl-loop for (from . to) in (append ewm-surface-emulate-keys
+                                      (default-value 'ewm-surface-emulate-keys))
+           when (and (not (symbolp from)) (eql (ewm--key-event from) key))
+           return to))
+
+(defun ewm-skk--return-p (key)
+  "Non-nil when KEY is Return."
+  (memq key '(?\r return kp-enter)))
 
 (defun ewm-skk--show-preedit (surface-id text)
   "Show TEXT as SURFACE-ID's preedit unless it already shows."
@@ -127,15 +148,18 @@ then goes to the client."
     (setq ewm-skk--preedit text)
     (ewm-im-preedit text surface-id)))
 
-(defun ewm-skk--forward (surface-id raw)
-  "Hand compositor key RAW to SURFACE-ID's client, clearing the preedit first."
+(defun ewm-skk--forward (surface-id key raw)
+  "Hand KEY, compositor key RAW, to SURFACE-ID's client, clearing the preedit.
+An emulated KEY sends what it emulates, as the compositor would have."
   (ewm-skk--show-preedit surface-id "")
-  (when raw (ewm-text-input--forward-key raw)))
+  (if-let* ((to (and key (ewm-skk--emulation key))))
+      (ewm-send-key to surface-id)
+    (when raw (ewm-text-input--forward-key raw))))
 
-(defun ewm-skk--commit (surface-id text raw)
+(defun ewm-skk--commit (surface-id text key raw)
   "Commit confirmed TEXT to SURFACE-ID.
-A newline that Return RAW produced is typed as Return, so the field
-handles it as a key, not as inserted text."
+A newline that Return KEY (compositor key RAW) produced is typed as
+Return, so the field handles it as a key, not as inserted text."
   (let ((lines (split-string text "\n")))
     (while lines
       (unless (string-empty-p (car lines))
@@ -143,20 +167,53 @@ handles it as a key, not as inserted text."
         (setq ewm-skk--preedit "")
         (ewm-im-commit (car lines) surface-id))
       (when (cdr lines)
-        (if (ewm-skk--return-p raw)
-            (ewm-skk--forward surface-id raw)
+        (if (ewm-skk--return-p key)
+            (ewm-skk--forward surface-id key raw)
           (setq ewm-skk--preedit "")
           (ewm-im-commit "\n" surface-id)))
       (pop lines))))
 
-(defun ewm-skk--flush (surface-id raw)
-  "Send what DDSKK confirmed to SURFACE-ID and show the rest as preedit."
+(defun ewm-skk--flush (surface-id key raw)
+  "Send what DDSKK confirmed to SURFACE-ID and show the rest as preedit.
+KEY, compositor key RAW, is the key DDSKK just ran."
   (let* ((end (ewm-skk--boundary))
          (text (buffer-substring-no-properties (point-min) end)))
     (let ((inhibit-modification-hooks t))
       (delete-region (point-min) end))
-    (ewm-skk--commit surface-id text raw)
-    (ewm-skk--show-preedit surface-id (ewm-skk--preedit-text))))
+    (ewm-skk--commit surface-id text key raw)
+    (ewm-skk--show-preedit surface-id (ewm-skk--preedit-text))
+    (ewm-skk--track-conversion)))
+
+;;; Lifting intercepted keys mid-conversion
+
+(defun ewm-skk--resend-intercepts ()
+  "Tell the compositor which keys to intercept now."
+  (when ewm--module-mode (ewm--send-intercept-keys)))
+
+(defun ewm-skk--track-conversion ()
+  "Lift intercepted keys while the current buffer converts, restore them after."
+  (let ((converting (cond ((bound-and-true-p skk-henkan-mode) (current-buffer))
+                          ((eq ewm-skk--converting (current-buffer)) nil)
+                          (t ewm-skk--converting))))
+    (unless (eq converting ewm-skk--converting)
+      (setq ewm-skk--converting converting)
+      (ewm-skk--resend-intercepts))))
+
+(defun ewm-skk--lifted-p (spec)
+  "Non-nil when intercept SPEC must reach DDSKK in the converting surface.
+That is every emulation in its scope, and `ewm-mode-map' keys it binds
+to DDSKK commands."
+  (when-let* ((buf ewm-skk--converting)
+              ((buffer-live-p buf)))
+    (let ((dispatch (plist-get spec :dispatch))
+          (surface (plist-get spec :surface)))
+      (if (eq (car-safe dispatch) 'emulate)
+          (or (null surface)
+              (eql surface (buffer-local-value 'ewm-surface-id buf)))
+        (and (eq dispatch 'command)
+             (when-let* ((key (ewm--key-event (plist-get spec :description))))
+               (with-current-buffer buf
+                 (ewm-skk--skk-command-p (ewm-skk--binding key)))))))))
 
 ;;; Running keys
 
@@ -217,28 +274,50 @@ from the input method handing a key back."
     (setq unread-command-events (nreverse kept))
     (nreverse handed)))
 
+(defun ewm-skk--effective-key (key)
+  "KEY, or the key it emulates when only that one means something to DDSKK.
+So C-h emulating Backspace deletes in the reading."
+  (if (ewm-skk--skk-command-p (ewm-skk--binding key))
+      key
+    (let ((to (and (ewm-skk--emulation key)
+                   (ewm--key-event (ewm-skk--emulation key)))))
+      (if (and to (ewm-skk--skk-command-p (ewm-skk--binding to))) to key))))
+
 (defun ewm-skk--key (surface-id key raw)
   "Give KEY (compositor key RAW) to DDSKK in the current surface buffer."
   (cond
    ;; The field went away under a read; `ewm-skk--input' cleans up.
    ((eq key 'ewm-text-input-abort))
-   ((null key) (ewm-skk--forward surface-id raw))
-   ((or (ewm-text-input--text-p key)
-        (member key ewm-skk-keys)
-        (and (not (ewm-skk--idle-p))
-             (ewm-skk--skk-command-p (ewm-skk--binding key))))
-    (ewm-skk--execute key)
-    (ewm-skk--flush surface-id raw))
-   ((ewm-skk--idle-p) (ewm-skk--forward surface-id raw))
+   ((null key) (ewm-skk--forward surface-id nil raw))
    (t
-    ;; Leaving the conversion for another key confirms it, as `C-j' does.
-    (ewm-skk--execute ?\C-j #'skk-kakutei)
-    (ewm-skk--flush surface-id nil)
-    (ewm-skk--forward surface-id raw))))
+    (let ((run (cond ((or (ewm-text-input--text-p key) (member key ewm-skk-keys)) key)
+                     ((not (ewm-skk--idle-p))
+                      (let ((eff (ewm-skk--effective-key key)))
+                        (and (ewm-skk--skk-command-p (ewm-skk--binding eff)) eff))))))
+      (cond
+       (run
+        (ewm-skk--execute run)
+        (ewm-skk--flush surface-id key raw))
+       ((ewm-skk--idle-p) (ewm-skk--forward surface-id key raw))
+       (t
+        ;; Leaving the conversion for another key confirms it, as `C-j' does.
+        (ewm-skk--execute ?\C-j #'skk-kakutei)
+        (ewm-skk--flush surface-id nil nil)
+        (ewm-skk--forward surface-id key raw)))))))
+
+(defun ewm-skk--minibuffer-setup ()
+  "Clear the client's preedit before DDSKK's minibuffer takes the focus.
+A client losing focus may keep its preedit as typed text."
+  (when (and (buffer-live-p ewm-skk--running)
+             (= (minibuffer-depth) (1+ ewm-skk--depth)))
+    (with-current-buffer ewm-skk--running
+      (ewm-skk--show-preedit ewm-surface-id ""))))
 
 (defun ewm-skk--preedit-sync (_window)
   "Before a redisplay mid-command, show the client what DDSKK has so far."
   (when-let* ((surface-id ewm-text-input--composing)
+              ;; Not while DDSKK's minibuffer holds the focus.
+              ((= (minibuffer-depth) ewm-skk--depth))
               (buf (ewm--surface-buffer surface-id))
               ((ewm-skk--surface-p buf)))
     (with-current-buffer buf
@@ -275,6 +354,9 @@ Keys DDSKK reads or hands back meanwhile run there too."
         ;; field going away clears this.
         (let ((ewm-text-input--composing surface-id)
               (ewm-skk--running buf)
+              (ewm-skk--depth (minibuffer-depth))
+              (minibuffer-setup-hook
+               (cons #'ewm-skk--minibuffer-setup minibuffer-setup-hook))
               ;; Unconfirmed text is preedit, not an insertion to commit.
               (after-change-functions nil)
               (pre-redisplay-functions
@@ -345,7 +427,8 @@ keys DDSKK may want do, and the rest reach the client at once."
       (error (message "ewm-skk: %s" (error-message-string err))))
     (let ((inhibit-modification-hooks t))
       (erase-buffer))
-    (setq ewm-skk--preedit "")))
+    (setq ewm-skk--preedit "")
+    (ewm-skk--track-conversion)))
 
 (defun ewm-skk--field-gone ()
   "Abandon every SKK surface's conversion: its field went away."
@@ -379,7 +462,12 @@ reading as preedit; other surfaces keep the plain input method relay."
   (let ((add (if ewm-skk-mode #'add-hook #'remove-hook)))
     (funcall add 'ewm-text-input-key-functions #'ewm-skk--handle-key)
     (funcall add 'ewm-text-input-surface-composer-functions #'ewm-skk--composer-p)
-    (funcall add 'ewm-text-input-deactivate-hook #'ewm-skk--field-gone))
+    (funcall add 'ewm-text-input-deactivate-hook #'ewm-skk--field-gone)
+    (funcall add 'ewm-intercept-keys-filter-functions #'ewm-skk--lifted-p))
+  (unless ewm-skk-mode
+    (when ewm-skk--converting
+      (setq ewm-skk--converting nil)
+      (ewm-skk--resend-intercepts)))
   (if ewm-skk-mode
       (advice-add 'skk-mode :after #'ewm-skk--refresh)
     (advice-remove 'skk-mode #'ewm-skk--refresh))

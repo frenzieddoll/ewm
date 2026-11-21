@@ -231,6 +231,16 @@ Then turn on `japanese-skk` (`C-\`) or `skk-mode` in the app's buffer.
 - A newline produced by Return (DDSKK confirms and inserts one unless
   `skk-egg-like-newline`) is typed into the client as Return.
 - A field deactivating drops the unconfirmed reading without learning it.
+- The compositor applies `ewm-surface-emulate-keys` and `ewm-mode-map` keys
+  before text input sees them, and a client handed C-m as Return keeps its
+  preedit as text. While ▽/▼ is open, the focused surface's emulations and
+  the `ewm-mode-map` keys bound to DDSKK commands are not intercepted
+  (`ewm-intercept-keys-filter-functions`). A key then keeps its DDSKK meaning
+  (C-m confirms, C-g cancels), takes the key it emulates when only that one
+  means something to DDSKK (C-h as Backspace), or confirms and sends what it
+  emulates.
+- Before DDSKK's registration minibuffer takes the focus, the client's
+  preedit is cleared, since a client losing focus may keep it as text.
 
 ### Implementation Notes
 
