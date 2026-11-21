@@ -42,6 +42,21 @@ ibus, which then serves Emacs frames as well."
 
 (defvar ewm-text-input-auto-mode)
 
+(defvar ewm-text-input-key-functions nil
+  "Abnormal hook offered each compositor key before the input method sees it.
+Each function is called with the compositor EVENT, its Emacs key (or nil
+when Emacs cannot name it) and the surface buffer (or nil).  The first
+to return non-nil takes the key, and `ewm--handle-key' does nothing more.
+Not consulted for keys an input method reads mid-composition.")
+
+(defvar ewm-text-input-surface-composer-functions nil
+  "Abnormal hook asking whether the current surface buffer composes text.
+Run in the focused surface buffer with no arguments; a non-nil value turns
+interception on like an active input method does.")
+
+(defvar ewm-text-input-deactivate-hook nil
+  "Normal hook run after the client text field lost focus.")
+
 (defun ewm--handle-text-input-activated ()
   "Note that a client text field gained focus."
   (setq ewm-text-input--client-active t)
@@ -55,6 +70,7 @@ ibus, which then serves Emacs frames as well."
     (setq ewm-text-input--composing nil)
     (setq unread-command-events
           (nconc unread-command-events (list '(no-record . ewm-text-input-abort)))))
+  (run-hooks 'ewm-text-input-deactivate-hook)
   (when ewm-text-input-auto-mode (ewm-text-input--refresh-auto-state)))
 
 (defun ewm-im-commit (text surface-id)
@@ -93,7 +109,10 @@ Value is (SURFACE-ID TEXT CURSOR ANCHOR); CURSOR/ANCHOR are byte offsets."
 (defun ewm-text-input--active-input-method ()
   "Return the input method of the focused text-input surface, if any."
   (when-let* ((buf (ewm--surface-buffer (ewm-get-focused-id))))
-    (buffer-local-value 'current-input-method buf)))
+    (or (buffer-local-value 'current-input-method buf)
+        (with-current-buffer buf
+          (run-hook-with-args-until-success
+           'ewm-text-input-surface-composer-functions)))))
 
 (defun ewm-text-input--refresh-auto-state ()
   "Intercept keys only in auto mode with an active field and input method."
@@ -168,6 +187,8 @@ Value is (SURFACE-ID TEXT CURSOR ANCHOR); CURSOR/ANCHOR are byte offsets."
         (setq ewm-text-input--raw (nconc ewm-text-input--raw (list event)))
         (setq unread-command-events
               (nconc unread-command-events (list (cons 'no-record key))))))
+     ((run-hook-with-args-until-success
+       'ewm-text-input-key-functions event key surface-buf))
      ((and (ewm-text-input--text-p key) surface-buf)
       (setq unread-command-events
             (nconc unread-command-events
