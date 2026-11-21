@@ -591,16 +591,26 @@ Command entries instead remap to `ewm-surface-emulate' in surface buffers."
                   collect (cons surface (buffer-local-value 'ewm-surface-emulate-keys buf)))
          (list (cons nil (default-value 'ewm-surface-emulate-keys)))))
 
+(defvar ewm-intercept-keys-filter-functions nil
+  "Abnormal hook offered each intercept spec before it goes to the compositor.
+Called with the spec plist, which carries `:description', `:dispatch' and
+`:surface'; a function returning non-nil keeps the key from being
+intercepted.  Call `ewm--send-intercept-keys' when the answer changes.")
+
 (defun ewm--send-intercept-keys ()
   "Send emulations and `ewm-mode-map' keys to the compositor.
 Emulations go first, since the compositor takes the first match."
   (ewm-input--cancel-resend)
   (ewm-input--install-xf86-key-aliases)
   (ewm-intercept-keys-module
-   (vconcat (cl-loop for (surface . table) in (ewm--emulation-tables)
+   (vconcat
+    (seq-remove
+     (lambda (spec)
+       (run-hook-with-args-until-success 'ewm-intercept-keys-filter-functions spec))
+     (nconc (cl-loop for (surface . table) in (ewm--emulation-tables)
                      nconc (ewm--emulation-specs table surface))
             (seq-keep (lambda (item) (ewm--event-to-intercept-spec (car item) (cdr item)))
-                      (ewm--mode-map-entries)))))
+                      (ewm--mode-map-entries)))))))
 
 (defun ewm-input--on-define-key (keymap &optional _key _def _remove)
   "Resend the intercept list once idle after a change to `ewm-mode-map'."
