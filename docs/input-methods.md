@@ -203,6 +203,35 @@ A field deactivating mid-composition aborts it.
 
 No environment variables needed (unlike X11's `XMODIFIERS`).
 
+### DDSKK
+
+DDSKK is not a quail method: its `input-method-function` is `list` and the
+conversion happens in `skk-j-mode-map` commands editing the buffer, so the
+relay above would commit raw romaji. `lisp/ewm-skk.el` adapts it (opt-in):
+
+```elisp
+(require 'ewm-skk)
+(ewm-skk-mode 1)
+```
+
+Then turn on `japanese-skk` (`C-\`) or `skk-mode` in the app's buffer.
+
+- A key for a surface whose buffer has `skk-mode` queues an `ewm-skk-key`
+  special event. Its handler looks the key up in the surface buffer's keymaps
+  and runs the command between `pre-command-hook` and `post-command-hook`, as
+  the command loop would; keys DDSKK reads mid-command (the candidate list,
+  dictionary registration) come from `unread-command-events` like quail's.
+- After each key, text before the ▽/▼ mark (all text when not converting) is
+  confirmed: it is committed and deleted. The rest, with the pending romaji
+  prefix, is shown as preedit, so the buffer only holds unconfirmed text.
+- With nothing unconfirmed, only text keys and `ewm-skk-keys` (`C-j`) go to
+  DDSKK; Return, Backspace and shortcuts reach the client untouched. Mid
+  conversion, DDSKK commands (and `ewm-skk-commands`) run; any other key
+  confirms the conversion and then reaches the client.
+- A newline produced by Return (DDSKK confirms and inserts one unless
+  `skk-egg-like-newline`) is typed into the client as Return.
+- A field deactivating drops the unconfirmed reading without learning it.
+
 ### Implementation Notes
 
 The compositor implements both protocols:
@@ -211,6 +240,6 @@ The compositor implements both protocols:
 
 Key interception only occurs when:
 1. Text input is active (app requested it)
-2. An Emacs input method is enabled
+2. An Emacs input method is enabled (or, with `ewm-skk-mode`, `skk-mode`)
 3. The focused surface is not Emacs (Emacs handles its own input)
 4. `ewm-text-input-provider` is `emacs`
