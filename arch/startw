@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+EMACS_BIN="/usr/bin/emacs"
+INIT_FILE="$HOME/.emacs.d/init.el"
+EWM_LISP="/usr/share/emacs/site-lisp/ewm"
+
+export EWM_MODULE_PATH="/usr/lib/ewm/libewm_core.so"
+export GDK_DPI_SCALE=1.1354
+export EWM=enable
+export LANG=ja_JP.UTF-8
+
+dconf load / < "$HOME/.config/dconf/gnome-settings.ini"
+
+exec "$EMACS_BIN" \
+    -Q \
+    --fg-daemon=ewm \
+    -L "$EWM_LISP" \
+    -l ewm \
+    -l "$INIT_FILE" \
+    -f ewm-start-module

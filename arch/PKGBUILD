@@ -1,0 +1,85 @@
+pkgname=ewm-skk-git
+pkgver=0.1.0.r1270.g31b6ee3
+pkgrel=1
+pkgdesc="Emacs Wayland Manager with SKK extensions"
+arch=('x86_64')
+url="https://github.com/frenzieddoll/ewm"
+license=('GPL-3.0-or-later')
+
+depends=(
+    'emacs-wayland'
+    'wayland'
+    'libxkbcommon'
+    'libinput'
+    'libdrm'
+    'libdisplay-info'
+    'seatd'
+    'mesa'
+    'libglvnd'
+    'glib2'
+    'systemd-libs'
+    'pipewire'
+)
+
+makedepends=(
+    'git'
+    'rust'
+    'cargo'
+    'clang'
+    'pkgconf'
+)
+
+optdepends=(
+    'xorg-xwayland: X11 application support'
+    'xwayland-satellite: Xwayland window integration'
+    'wl-clipboard: Clipboard tools'
+    'grim: Screenshots'
+    'slurp: Region selection'
+)
+
+source=(
+    "ewm::git+https://github.com/frenzieddoll/ewm.git#branch=skk"
+)
+
+sha256sums=('SKIP')
+
+pkgver() {
+    cd "$srcdir/ewm"
+
+    printf "0.1.0.r%s.g%s" \
+        "$(git rev-list --count HEAD)" \
+        "$(git rev-parse --short=7 HEAD)"
+}
+
+build() {
+    cd "$srcdir/ewm/compositor"
+
+    cargo build \
+        --release \
+        --locked
+}
+
+package() {
+    cd "$srcdir/ewm"
+
+    # Rust dynamic module
+    install -Dm755 \
+        compositor/target/release/libewm_core.so \
+        "$pkgdir/usr/lib/ewm/libewm_core.so"
+
+    # Emacs Lisp
+    install -dm755 \
+        "$pkgdir/usr/share/emacs/site-lisp/ewm"
+
+    install -m644 lisp/*.el \
+        "$pkgdir/usr/share/emacs/site-lisp/ewm/"
+
+    # Start Script
+    install -Dm755 \
+        arch/startw \
+        "${pkgdir}/usr/bin/startw"
+
+    # License
+    install -Dm644 LICENSE \
+        "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
