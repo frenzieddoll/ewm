@@ -57,6 +57,19 @@ interception on like an active input method does.")
 (defvar ewm-text-input-deactivate-hook nil
   "Normal hook run after the client text field lost focus.")
 
+(defvar ewm-text-input-client-functions nil
+  "Abnormal hook offered what Emacs sends a client field, before text input.
+Each function is called with OP, one of `commit', `preedit' or `forward',
+then ARG, the text or the compositor key event handed back, and the
+SURFACE-ID.  The first to return non-nil has delivered it, and text input
+sends nothing.  This lets keys that did not come from text input go back
+the way they came.")
+
+(defun ewm-text-input--deliver (op arg surface-id)
+  "Offer OP with ARG for SURFACE-ID to `ewm-text-input-client-functions'."
+  (run-hook-with-args-until-success 'ewm-text-input-client-functions
+                                    op arg surface-id))
+
 (defun ewm--handle-text-input-activated ()
   "Note that a client text field gained focus."
   (setq ewm-text-input--client-active t)
@@ -75,11 +88,13 @@ interception on like an active input method does.")
 
 (defun ewm-im-commit (text surface-id)
   "Commit TEXT to the client text field on SURFACE-ID."
-  (ewm-im-commit-module text surface-id))
+  (unless (ewm-text-input--deliver 'commit text surface-id)
+    (ewm-im-commit-module text surface-id)))
 
 (defun ewm-im-preedit (text surface-id)
   "Show TEXT as the composing text in the client field on SURFACE-ID."
-  (ewm-im-preedit-module text surface-id))
+  (unless (ewm-text-input--deliver 'preedit text surface-id)
+    (ewm-im-preedit-module text surface-id)))
 
 (defun ewm-text-input-replace (text surface-id)
   "Replace the whole content of the field on SURFACE-ID with TEXT."
@@ -94,7 +109,8 @@ Value is (SURFACE-ID TEXT CURSOR ANCHOR); CURSOR/ANCHOR are byte offsets."
   "Hand EVENT's key back to the compositor."
   (let ((surface-id (alist-get 'surface_id event))
         (keycode (alist-get 'keycode event)))
-    (when (and (numberp surface-id) (numberp keycode))
+    (when (and (not (ewm-text-input--deliver 'forward event surface-id))
+               (numberp surface-id) (numberp keycode))
       (ewm-text-input-forward-key-module
        surface-id keycode
        (alist-get 'ctrl event) (alist-get 'alt event)
