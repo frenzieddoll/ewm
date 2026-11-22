@@ -7,11 +7,14 @@ INIT_FILE="$HOME/.emacs.d/init.el"
 EWM_LISP="/usr/share/emacs/site-lisp/ewm"
 
 export EWM_MODULE_PATH="/usr/lib/ewm/libewm_core.so"
-export GDK_DPI_SCALE=1.1354
 export EWM=enable
 export LANG=ja_JP.UTF-8
 
 dconf load / < "$HOME/.config/dconf/gnome-settings.ini"
+
+unset GTK_IM_MODULE
+unset QT_IM_MODULE
+unset XMODIFIERS
 
 exec "$EMACS_BIN" \
     -Q \
