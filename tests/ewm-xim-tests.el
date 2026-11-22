@@ -321,6 +321,30 @@
     ;; Attribute id, value length, then the XIMStyles count.
     (should (equal (append (substring data 0 6) nil) '(0 0 8 0 1 0)))))
 
+(ert-deftest ewm-xim-lists-preedit-and-status-attributes ()
+  "IC attributes Wine passes for the root-window style are listed.
+libX11 fails XCreateIC on any attribute the server did not list."
+  (skip-unless ewm-xim-tests--have-xim)
+  (let ((names (mapcar (lambda (attr) (slot-value attr 'attribute))
+                       (ewm-xim--ic-attrs))))
+    (dolist (name '("inputStyle" "clientWindow" "focusWindow" "filterEvents"
+                    "preeditAttributes" "statusAttributes" "fontSet"
+                    "spotLocation"))
+      (should (member name names)))))
+
+(ert-deftest ewm-xim-answers-ic-values ()
+  "GET_IC_VALUES answers the input style and the events to filter."
+  (skip-unless ewm-xim-tests--have-xim)
+  (let* ((xim:lsb t)
+         (id (lambda (name)
+               (cl-position name ewm-xim--ic-attr-table :key #'car :test #'equal)))
+         (values (ewm-xim--ic-values (list (funcall id "filterEvents")
+                                           (funcall id "inputStyle")
+                                           (funcall id "fontSet")))))
+    (should (equal (mapcar (lambda (v) (append (xcb:marshal v) nil)) values)
+                   (list (list (funcall id "filterEvents") 0 4 0 3 0 0 0)
+                         (list (funcall id "inputStyle") 0 4 0 8 4 0 0))))))
+
 (ert-deftest ewm-xim-registers-server ()
   "The server is listed in XIM_SERVERS and owns its selection."
   (ewm-xim-tests--with-server

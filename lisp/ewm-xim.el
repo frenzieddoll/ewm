@@ -296,24 +296,40 @@ Short requests travel in the client message, long ones in a property."
                        :length (length xlib:XNQueryInputStyle)
                        :attribute xlib:XNQueryInputStyle)))
 
+(defconst ewm-xim--ic-attr-table
+  `((,xlib:XNInputStyle . ,xim:ATTRIBUTE-VALUE-TYPE:long-data)
+    (,xlib:XNClientWindow . ,xim:ATTRIBUTE-VALUE-TYPE:window)
+    ;; Required by e.g. xterm.
+    (,xlib:XNFocusWindow . ,xim:ATTRIBUTE-VALUE-TYPE:window)
+    ("filterEvents" . ,xim:ATTRIBUTE-VALUE-TYPE:long-data)
+    ;; Wine passes preedit and status lists even for the root-window
+    ;; style, and libX11 fails XCreateIC on any attribute the server did
+    ;; not list.  The values are accepted and ignored.
+    ("preeditAttributes" . ,xim:ATTRIBUTE-VALUE-TYPE:xim-nested-list)
+    ("statusAttributes" . ,xim:ATTRIBUTE-VALUE-TYPE:xim-nested-list)
+    ("fontSet" . ,xim:ATTRIBUTE-VALUE-TYPE:x-font-set)
+    ("area" . ,xim:ATTRIBUTE-VALUE-TYPE:x-rectangle)
+    ("areaNeeded" . ,xim:ATTRIBUTE-VALUE-TYPE:x-rectangle)
+    ("colorMap" . ,xim:ATTRIBUTE-VALUE-TYPE:long-data)
+    ("stdColorMap" . ,xim:ATTRIBUTE-VALUE-TYPE:long-data)
+    ("foreground" . ,xim:ATTRIBUTE-VALUE-TYPE:long-data)
+    ("background" . ,xim:ATTRIBUTE-VALUE-TYPE:long-data)
+    ("backgroundPixmap" . ,xim:ATTRIBUTE-VALUE-TYPE:long-data)
+    ("spotLocation" . ,xim:ATTRIBUTE-VALUE-TYPE:x-point)
+    ("lineSpace" . ,xim:ATTRIBUTE-VALUE-TYPE:long-data)
+    ("cursor" . ,xim:ATTRIBUTE-VALUE-TYPE:long-data)
+    ("separatorofNestedList" . ,xim:ATTRIBUTE-VALUE-TYPE:separator-of-nestedlist))
+  "IC attributes clients may set, as (NAME . TYPE); the id is the position.")
+
 (defun ewm-xim--ic-attrs ()
   "IC attributes clients may set."
-  (list (make-instance 'xim:XICATTR
-                       :id 0
-                       :type xim:ATTRIBUTE-VALUE-TYPE:long-data
-                       :length (length xlib:XNInputStyle)
-                       :attribute xlib:XNInputStyle)
-        (make-instance 'xim:XICATTR
-                       :id 1
-                       :type xim:ATTRIBUTE-VALUE-TYPE:window
-                       :length (length xlib:XNClientWindow)
-                       :attribute xlib:XNClientWindow)
-        ;; Required by e.g. xterm.
-        (make-instance 'xim:XICATTR
-                       :id 2
-                       :type xim:ATTRIBUTE-VALUE-TYPE:window
-                       :length (length xlib:XNFocusWindow)
-                       :attribute xlib:XNFocusWindow)))
+  (cl-loop for (name . type) in ewm-xim--ic-attr-table
+           for id from 0
+           collect (make-instance 'xim:XICATTR
+                                  :id id
+                                  :type type
+                                  :length (length name)
+                                  :attribute name)))
 
 (defclass ewm-xim--styles (xim:XIMStyles) ()
   :documentation "XIMStyles with its count of styles right.")
@@ -336,6 +352,23 @@ libX11 checks the count against the value's length and rejects it."
                                :number nil
                                :styles (list (logior xlib:XIMPreeditNothing
                                                      xlib:XIMStatusNothing))))))
+
+(defun ewm-xim--ic-values (ids)
+  "Values of the IC attributes IDS that the server keeps: the input
+style and the events to filter.  Others are left out."
+  (let ((pack (if xim:lsb #'xcb:-pack-u4-lsb #'xcb:-pack-u4)))
+    (cl-loop for id in ids
+             for name = (car (nth id ewm-xim--ic-attr-table))
+             for value = (pcase name
+                           ((pred (equal xlib:XNInputStyle))
+                            (logior xlib:XIMPreeditNothing xlib:XIMStatusNothing))
+                           ("filterEvents"
+                            (logior xcb:EventMask:KeyPress xcb:EventMask:KeyRelease)))
+             when value
+             collect (make-instance 'xim:XICATTRIBUTE
+                                    :id id
+                                    :length 4
+                                    :value (funcall pack value)))))
 
 (defun ewm-xim--next-id (id)
   "The id after ID, in 1..#xffff."
@@ -564,7 +597,8 @@ libX11 checks the count against the value's length and rejects it."
                              :im-id (slot-value req 'im-id)
                              :ic-id (slot-value req 'ic-id)
                              :length nil
-                             :ic-attributes (ewm-xim--attributes))
+                             :ic-attributes (ewm-xim--ic-values
+                                             (slot-value req 'ic-attributes-id)))
               replies)))
      ((= opcode xim:opcode:set-ic-focus)
       ;; Keys name their IC, and the focused surface names the buffer.
