@@ -95,7 +95,8 @@
 (defun ewm-xim-tests--stop-xvfb ()
   "Stop Xvfb."
   (when (process-live-p ewm-xim-tests--xvfb)
-    (kill-process ewm-xim-tests--xvfb)
+    ;; Killed outright, Xvfb would leave its lock and socket behind.
+    (signal-process ewm-xim-tests--xvfb 'SIGTERM)
     (while (process-live-p ewm-xim-tests--xvfb)
       (accept-process-output nil 0.05))))
 
@@ -241,6 +242,18 @@
     (while (not (equal (ewm-xim-tests--typed) text))
       (ewm-xim-tests--pump 0.05)))
   (ewm-xim-tests--typed))
+
+(defun ewm-xim-tests--focus (conn xwin)
+  "Give the X input focus to XWIN."
+  (xcb:+request conn
+      (make-instance 'xcb:SetInputFocus :revert-to xcb:InputFocus:PointerRoot
+                     :focus xwin :time xcb:Time:CurrentTime))
+  (xcb:flush conn))
+
+(defun ewm-xim-tests--focused (conn)
+  "The window with the X input focus."
+  (slot-value (xcb:+request-unchecked+reply conn (make-instance 'xcb:GetInputFocus))
+              'focus))
 
 (defmacro ewm-xim-tests--with-xterm (&rest body)
   "Run BODY with an XIM xterm focused, as surface 10 of buffer `surface'."
@@ -417,6 +430,53 @@
             (ewm-xim-tests--press 'return)
             (should (equal (ewm-xim-tests--wait-typed "か日本\n") "か日本\n"))
             (should (equal ewm-xim--preedit "")))
+        (ewm-skk-mode -1)))))
+
+(ert-deftest ewm-xim-xterm-unfocus-drops-reading ()
+  "A client losing focus mid-conversion drops the reading, typing nothing."
+  (skip-unless ewm-xim-tests--have-skk)
+  (ewm-xim-tests--with-xterm
+    (let ((ewm-text-input-key-functions nil)
+          (ewm-text-input-surface-composer-functions nil)
+          (ewm-text-input-deactivate-hook nil)
+          (ewm-intercept-keys-filter-functions nil)
+          (ewm-skk--converting nil)
+          (xwin (ewm-xim-tests--focused ewm-xim-tests--xtest)))
+      (ewm-skk-mode 1)
+      (unwind-protect
+          (progn
+            (with-current-buffer surface (set-input-method "japanese-skk"))
+            (ewm-xim-tests--press "Nihon")
+            (should (string-prefix-p "▽にほ" ewm-xim--preedit))
+            (ewm-xim-tests--focus ewm-xim-tests--xtest xcb:InputFocus:None)
+            (with-timeout (5 (error "The reading was kept"))
+              (while (not (with-current-buffer surface (ewm-skk--idle-p)))
+                (ewm-xim-tests--pump 0.05)))
+            (should (equal ewm-xim--preedit ""))
+            (ewm-xim-tests--focus ewm-xim-tests--xtest xwin)
+            (ewm-xim-tests--pump 0.2)
+            (ewm-xim-tests--press "a" 'return)
+            (should (equal (ewm-xim-tests--wait-typed "あ\n") "あ\n")))
+        (ewm-skk-mode -1)))))
+
+(ert-deftest ewm-xim-xterm-unfocus-keeps-a-read ()
+  "Focus leaving for the input method's own read keeps the reading."
+  (skip-unless ewm-xim-tests--have-skk)
+  (ewm-xim-tests--with-xterm
+    (let ((ewm-text-input-key-functions nil)
+          (ewm-text-input-surface-composer-functions nil)
+          (ewm-text-input-deactivate-hook nil)
+          (ewm-intercept-keys-filter-functions nil)
+          (ewm-skk--converting nil))
+      (ewm-skk-mode 1)
+      (unwind-protect
+          (progn
+            (with-current-buffer surface (set-input-method "japanese-skk"))
+            (ewm-xim-tests--press "Nihon")
+            (let ((ewm-text-input--composing 10))
+              (ewm-xim-tests--focus ewm-xim-tests--xtest xcb:InputFocus:None)
+              (ewm-xim-tests--pump 0.5))
+            (should-not (with-current-buffer surface (ewm-skk--idle-p))))
         (ewm-skk-mode -1)))))
 
 (ert-deftest ewm-xim-xterm-client-goes-away ()

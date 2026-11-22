@@ -55,7 +55,8 @@ Run in the focused surface buffer with no arguments; a non-nil value turns
 interception on like an active input method does.")
 
 (defvar ewm-text-input-deactivate-hook nil
-  "Normal hook run after the client text field lost focus.")
+  "Normal hook run after the client text field lost focus.
+Also run for a field that takes keys another way, such as over XIM.")
 
 (defvar ewm-text-input-client-functions nil
   "Abnormal hook offered what Emacs sends a client field, before text input.

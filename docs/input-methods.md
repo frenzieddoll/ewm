@@ -14,6 +14,8 @@
 | Delete surrounding text | `input_method_v2` | TODO | Cut in surface buffers, backspace during composition |
 | Input popup surface | `input_method_v2` | Done | Candidate window below the client cursor |
 | External input methods | `input_method_v2` | Done | `ewm-text-input-provider` hands the seat to fcitx5 or ibus |
+| DDSKK | `text_input_v3` | Done | `ewm-skk-mode` (`lisp/ewm-skk.el`) |
+| Xwayland clients | XIM | Done | `ewm-xim-mode` (`lisp/ewm-xim.el`), needs XELB; root-window style only |
 
 ### Priority
 
@@ -215,6 +217,9 @@ relay above would commit raw romaji. `lisp/ewm-skk.el` adapts it (opt-in):
 ```
 
 Then turn on `japanese-skk` (`C-\`) or `skk-mode` in the app's buffer.
+DDSKK must already be installed and configured for Emacs itself: its
+dictionaries, `skk-egg-like-newline` and the rest apply unchanged. With
+`ewm-xim-mode` (below) the same works in Xwayland apps.
 
 - A key for a surface whose buffer has `skk-mode` queues an `ewm-skk-key`
   special event. Its handler looks the key up in the surface buffer's keymaps
@@ -241,12 +246,109 @@ Then turn on `japanese-skk` (`C-\`) or `skk-mode` in the app's buffer.
   emulates.
 - Before DDSKK's registration minibuffer takes the focus, the client's
   preedit is cleared, since a client losing focus may keep it as text.
+  The reading itself survives the registration, and what it confirms is
+  committed once the minibuffer exits.
+
+Keys DDSKK commonly binds in Emacs keep working mid conversion even if
+`ewm-mode-map` or `ewm-surface-emulate-keys` claims them, for example:
+
+```elisp
+(define-key ewm-mode-map (kbd "C-j") #'skk-kakutei)   ; still confirms
+(customize-set-variable
+ 'ewm-surface-emulate-keys
+ (append '(("C-m" . "<return>") ("C-h" . "<backspace>") ("C-g" . "<escape>"))
+         ewm-surface-emulate-keys))
+```
+
+With nothing converting these keys behave as configured; while ▽/▼ is
+open C-m confirms, C-h deletes in the reading and C-g cancels.
+
+## Xwayland Clients (XIM)
+
+X clients run through xwayland-satellite and never see `text_input_v3`, so
+the relay above cannot reach them. `lisp/ewm-xim.el` makes Emacs an XIM
+server on the Xwayland display instead, written with XELB and ported from
+EXWM's `exwm-xim.el`. It is opt-in, and XELB is needed only when it is on:
+
+```elisp
+(require 'ewm-xim)
+(ewm-xim-mode 1)
+```
+
+Start X clients with the server named in `XMODIFIERS`; GTK also needs its
+XIM module:
+
+```sh
+XMODIFIERS=@im=ewm-xim xterm
+XMODIFIERS=@im=ewm-xim GTK_IM_MODULE=xim GDK_BACKEND=x11 mousepad
+```
+
+Then turn on the input method in the app's surface buffer, as for a
+Wayland app. `xprop -root XIM_SERVERS` lists `@server=ewm-xim` while the
+server runs. A client started before the server does not use it; restart
+the client.
+
+### How It Works
+
+```
+X client            xwayland-satellite / Xwayland            Emacs (ewm-xim)
+    |                              |                              |
+    |  [user types]                |                              |
+    |--XIM FORWARD_EVENT (KeyPress, over X ClientMessages)------->|
+    |<--SYNC_REPLY (at once)--------------------------------------|
+    |                              |      ewm--handle-key         |
+    |                              |      (focused surface)       |
+    |<--COMMIT (COMPOUND_TEXT) or FORWARD_EVENT (key unused)------|
+```
+
+- The server takes the `@server=ewm-xim` selection, lists it in the root
+  window's `XIM_SERVERS` and answers the `LOCALES` and `TRANSPORT` queries.
+  Like EXWM it offers transport 0.0 over the X connection, static event
+  flow, and the root-window style (`XIMPreeditNothing | XIMStatusNothing`)
+  only.
+- Every key press the client forwards is answered with `SYNC_REPLY` at
+  once, since Xlib blocks until it is. Emacs's answer follows later.
+- The key becomes a compositor key event for the focused surface. If that
+  surface's buffer has an input method, or a composer such as `ewm-skk`, it
+  goes through `ewm--handle-key` like a text-input key, so quail methods and
+  DDSKK serve X clients unchanged. Otherwise it is handed straight back.
+- What the input method commits, shows as preedit or hands back returns
+  over XIM through `ewm-text-input-client-functions` instead of text
+  input. The root-window style gives the client no place for preedit, so
+  it shows in the echo area.
+- A field losing focus (`UNSET_IC_FOCUS`) runs
+  `ewm-text-input-deactivate-hook`, as a text-input field does, so the
+  unconfirmed reading is dropped. Not while the input method itself reads,
+  as when DDSKK's registration minibuffer takes the focus.
+- xwayland-satellite starts on the first X connection, and the server's is
+  one: it connects once EWM is ready (`ewm-mode-hook`), so Xwayland is up
+  and the server registered before any client calls `XOpenIM`. If Xwayland
+  goes away the server reconnects after `ewm-xim-reconnect-delay`, and
+  gives up after repeated quick failures.
+- XELB writes the count of `XIMStyles` as a byte count, which current
+  libX11 rejects ("input method doesn't support any style"). The server
+  marshals the styles with the count fixed.
+
+### Limitations
+
+- No on-the-spot preedit: the reading shows in the echo area, not in the
+  client.
+- Keys are mapped to the focused surface, not to the X window that sent
+  them; with one X client focused at a time they agree.
 
 ### Implementation Notes
 
 The compositor implements both protocols:
 - `zwp_text_input_v3` (client-side): Apps request text input
 - `zwp_input_method_v2` (compositor-side): Manages input method state
+
+Extension points other input code can use:
+- `ewm-text-input-key-functions`: take a key before the input method sees it
+- `ewm-text-input-surface-composer-functions`: say a surface buffer composes
+- `ewm-text-input-deactivate-hook`: a client field lost focus
+- `ewm-text-input-client-functions`: deliver commits, preedits and handed-back
+  keys some other way than text input (XIM uses it)
+- `ewm-intercept-keys-filter-functions`: keep keys from being intercepted
 
 Key interception only occurs when:
 1. Text input is active (app requested it)

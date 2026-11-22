@@ -28,7 +28,8 @@
 ;; method commits, shows as preedit or hands back then returns over XIM, by
 ;; `ewm-text-input-client-functions'.  Other keys go straight back.  The
 ;; root-window style has no preedit in the client, so it shows in the echo
-;; area.
+;; area.  A field losing focus runs `ewm-text-input-deactivate-hook', as a
+;; text-input field does, so its unconfirmed text is dropped.
 ;;
 ;; xwayland-satellite starts on the first X connection, and connecting here
 ;; is one: the server brings Xwayland up when EWM is ready, so clients find
@@ -565,9 +566,12 @@ libX11 checks the count against the value's length and rejects it."
                              :length nil
                              :ic-attributes (ewm-xim--attributes))
               replies)))
-     ((memq opcode (list xim:opcode:set-ic-focus xim:opcode:unset-ic-focus))
+     ((= opcode xim:opcode:set-ic-focus)
       ;; Keys name their IC, and the focused surface names the buffer.
       nil)
+     ((= opcode xim:opcode:unset-ic-focus)
+      (ewm-xim--on-unfocus
+       (slot-value (ewm-xim--parse 'xim:unset-ic-focus data) 'ic-id)))
      ((= opcode xim:opcode:forward-event)
       (ewm-xim--on-forward-event (ewm-xim--parse 'xim:forward-event data) client))
      ((= opcode xim:opcode:sync)
@@ -646,6 +650,18 @@ It is aimed at SURFACE-ID and carries KEY, the `ewm-xim--key' to answer."
         (ewm--handle-key (ewm-xim--compositor-event (slot-value press 'detail)
                                              (slot-value press 'state)
                                              surface-id key))))))
+
+(defun ewm-xim--on-unfocus (ic-id)
+  "Drop the unconfirmed text of the field IC-ID names: it lost focus.
+Not while the input method reads for it, as when DDSKK's registration
+minibuffer took the focus."
+  (when-let* ((ic (gethash ic-id ewm-xim--ics))
+              (surface-id (cl-loop for id being the hash-keys of ewm-xim--surface-ics
+                                   using (hash-values i)
+                                   when (eq i ic) return id))
+              ((not (eql ewm-text-input--composing surface-id))))
+    (ewm-xim--show-preedit "")
+    (run-hooks 'ewm-text-input-deactivate-hook)))
 
 (defun ewm-xim--live-p (ic)
   "Non-nil when IC's client is still connected."
