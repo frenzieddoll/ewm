@@ -238,6 +238,14 @@ Value is (SURFACE-ID TEXT CURSOR ANCHOR); CURSOR/ANCHOR are byte offsets."
         (erase-buffer)
         (unwind-protect
             (let ((result (funcall (or input-method-function #'list) key)))
+              ;; Keys put back for an input method (kkc's, ending a
+              ;; conversion) are this field's next keys, not the command loop's.
+              (when unread-input-method-events
+                (setq unread-command-events
+                      (append (mapcar (lambda (ev) (cons 'no-record ev))
+                                      unread-input-method-events)
+                              unread-command-events)
+                      unread-input-method-events nil))
               ;; Nil once the field deactivated under the input method.
               (when ewm-text-input--composing
                 (setq text (concat (seq-filter #'characterp result)))))

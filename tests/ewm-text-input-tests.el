@@ -54,6 +54,11 @@
 
 (require 'ewm-text-input)
 
+;; kkc saves what it learnt when Emacs exits; keep it out of the user's file.
+(require 'kkc)
+(setq kkc-init-file-name
+      (expand-file-name "kkcrc" (make-temp-file "ewm-text-input-tests" t)))
+
 (defmacro ewm-text-input-tests--with-state (&rest body)
   "Run BODY with isolated text-input globals."
   (declare (indent 0) (debug t))
@@ -167,6 +172,24 @@ holds the keyboard, must not see the method's scratch text."
       (should (equal ewm-text-input-tests--commits '((10 . "é"))))
       (should-not (seq-find (lambda (p) (string-match-p "junk" (cdr p)))
                             ewm-text-input-tests--preedits)))))
+
+(ert-deftest ewm-text-input-tests/key-ending-a-conversion-stays-with-the-field ()
+  "A key that ends a kkc conversion is composed for the field, not dropped.
+kkc puts it back in `unread-input-method-events', where the command loop
+would give it to whatever buffer is current."
+  (ewm-text-input-tests--with-state
+    (ewm-text-input-tests--with-buffers (surface)
+      (let ((unread-input-method-events nil)
+            (key (lambda (c) (ewm-text-input-tests--key (string c) c))))
+        (puthash 10 surface ewm--surfaces)
+        (with-current-buffer surface (activate-input-method "japanese"))
+        (apply #'ewm-text-input-tests--type
+               (append (mapcar key "chikyuu ka")
+                       (list (ewm-text-input-tests--key #xff0d 36))))
+        (should (equal (reverse ewm-text-input-tests--commits)
+                       '((10 . "地球") (10 . "か"))))
+        (should-not unread-input-method-events)
+        (should-not unread-command-events)))))
 
 (ert-deftest ewm-text-input-tests/backspace-feeds-the-input-method ()
   "Backspace while composing edits the sequence instead of reaching the client."
