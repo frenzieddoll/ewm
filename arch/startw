@@ -12,9 +12,13 @@ export LANG=ja_JP.UTF-8
 
 dconf load / < "$HOME/.config/dconf/gnome-settings.ini"
 
+# Wayland clients use text-input-v3; do not route them to fcitx/ibus.
 unset GTK_IM_MODULE
 unset QT_IM_MODULE
-unset XMODIFIERS
+# Xwayland clients (xterm, Steam, Proton games) reach Emacs through
+# ewm-xim.  Only Xlib reads XMODIFIERS, so Wayland clients are unaffected.
+# GTK_IM_MODULE=xim stays per app: set globally it would break Wayland GTK.
+export XMODIFIERS=@im=ewm-xim
 
 exec "$EMACS_BIN" \
     -Q \
