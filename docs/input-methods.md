@@ -15,7 +15,7 @@
 | Input popup surface | `input_method_v2` | Done | Candidate window below the client cursor |
 | External input methods | `input_method_v2` | Done | `ewm-text-input-provider` hands the seat to fcitx5 or ibus |
 | DDSKK | `text_input_v3` | Done | `ewm-skk-mode` (`lisp/ewm-skk.el`) |
-| Xwayland clients | XIM | Done | `ewm-xim-mode` (`lisp/ewm-xim.el`), needs XELB; root-window style only |
+| Xwayland clients | XIM | Done | `ewm-xim-mode` (`lisp/ewm-xim.el`), needs XELB; on-the-spot and root-window styles |
 
 ### Priority
 
@@ -303,9 +303,10 @@ X client            xwayland-satellite / Xwayland            Emacs (ewm-xim)
 
 - The server takes the `@server=ewm-xim` selection, lists it in the root
   window's `XIM_SERVERS` and answers the `LOCALES` and `TRANSPORT` queries.
-  Like EXWM it offers transport 0.0 over the X connection, static event
-  flow, and the root-window style (`XIMPreeditNothing | XIMStatusNothing`)
-  only.
+  Like EXWM it offers transport 0.0 over the X connection and static
+  event flow. It offers two input styles: on-the-spot
+  (`XIMPreeditCallbacks | XIMStatusNothing`) and root-window
+  (`XIMPreeditNothing | XIMStatusNothing`).
 - Every key press the client forwards is answered with `SYNC_REPLY` at
   once, since Xlib blocks until it is. Emacs's answer follows later.
 - The key becomes a compositor key event for the focused surface. If that
@@ -314,8 +315,11 @@ X client            xwayland-satellite / Xwayland            Emacs (ewm-xim)
   DDSKK serve X clients unchanged. Otherwise it is handed straight back.
 - What the input method commits, shows as preedit or hands back returns
   over XIM through `ewm-text-input-client-functions` instead of text
-  input. The root-window style gives the client no place for preedit, so
-  it shows in the echo area.
+  input. An on-the-spot client (GTK, Wine) is sent `PREEDIT_START`,
+  `PREEDIT_DRAW` and `PREEDIT_DONE`, and draws the reading underlined in
+  its field. A commit ends the preedit first. The root-window style
+  (xterm) gives the client no place for preedit, so it shows in the echo
+  area.
 - A field losing focus (`UNSET_IC_FOCUS`) runs
   `ewm-text-input-deactivate-hook`, as a text-input field does, so the
   unconfirmed reading is dropped. Not while the input method itself reads,
@@ -331,8 +335,9 @@ X client            xwayland-satellite / Xwayland            Emacs (ewm-xim)
 
 ### Limitations
 
-- No on-the-spot preedit: the reading shows in the echo area, not in the
-  client.
+- The caret is always at the end of the preedit, and the whole of it is
+  underlined. No status callbacks: the input method's mode shows in the
+  surface buffer's mode line.
 - Keys are mapped to the focused surface, not to the X window that sent
   them; with one X client focused at a time they agree.
 

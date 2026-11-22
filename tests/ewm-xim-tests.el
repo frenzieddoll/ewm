@@ -311,6 +311,99 @@
            (kill-buffer surface)
            (delete-directory tmp t))))))
 
+;;; An Xlib client with preedit callbacks
+
+(defconst ewm-xim-tests--client-binary
+  (and ewm-xim-tests--have-xterm
+       (executable-find "cc")
+       (let ((out (expand-file-name "xim-client" (make-temp-file "ewm-xim-client" t))))
+         (and (zerop (call-process "cc" nil nil nil "-o" out
+                                   (expand-file-name "fixtures/xim-client.c"
+                                                     ewm-xim-tests--dir)
+                                   "-lX11"))
+              out)))
+  "The test client from fixtures/xim-client.c, built, or nil.")
+
+(defvar ewm-xim-tests--client nil "The running test client.")
+
+(defun ewm-xim-tests--client-lines ()
+  "Lines the test client reported, but the first (its window)."
+  (cdr (split-string (with-current-buffer (process-buffer ewm-xim-tests--client)
+                       (buffer-string))
+                     "\n" t)))
+
+(defun ewm-xim-tests--wait-line (line)
+  "Wait until the test client reports LINE; non-nil if it did."
+  (with-timeout (5 nil)
+    (while (not (member line (ewm-xim-tests--client-lines)))
+      (ewm-xim-tests--pump 0.05))
+    t))
+
+(defmacro ewm-xim-tests--with-xim-client (style &rest body)
+  "Run BODY with the test client focused in STYLE, as surface 10 of `surface'."
+  (declare (indent 1))
+  `(progn
+     (skip-unless ewm-xim-tests--client-binary)
+     (ewm-xim-tests--with-server
+       (let* ((ewm--surfaces (make-hash-table))
+              (ewm-text-input-client-functions '(ewm-xim--deliver))
+              (ewm-text-input--composing nil)
+              (ewm-text-input--raw nil)
+              (unread-command-events nil)
+              (inhibit-message t)
+              (surface (generate-new-buffer " *ewm-xim-client*"))
+              (ewm-xim-tests--client
+               (let ((process-environment
+                      (append '("XMODIFIERS=@im=ewm-xim" "LC_ALL=C.UTF-8")
+                              process-environment))
+                     (process-connection-type nil))
+                 (start-process "xim-client" (generate-new-buffer " *xim-client*")
+                                ewm-xim-tests--client-binary ,style)))
+              (ewm-xim-tests--xtest (xcb:connect ewm-xim-tests--display)))
+         (set-process-query-on-exit-flag ewm-xim-tests--client nil)
+         (set-process-coding-system ewm-xim-tests--client 'utf-8 'utf-8)
+         (unwind-protect
+             (cl-letf (((symbol-function 'ewm-get-focused-id) (lambda () 10)))
+               (puthash 10 surface ewm--surfaces)
+               (with-current-buffer surface
+                 (ewm-surface-mode)
+                 (setq ewm-surface-id 10))
+               (xcb:keysyms:init ewm-xim-tests--xtest)
+               (xcb:get-extension-data ewm-xim-tests--xtest 'xcb:xtest)
+               (let ((xwin nil))
+                 (with-timeout (10 (error "No client window"))
+                   (while (not xwin)
+                     (ewm-xim-tests--pump 0.05)
+                     (with-current-buffer (process-buffer ewm-xim-tests--client)
+                       (goto-char (point-min))
+                       (when (re-search-forward "^window \\([0-9]+\\)$" nil t)
+                         (setq xwin (string-to-number (match-string 1)))))))
+                 (ewm-xim-tests--focus ewm-xim-tests--xtest xwin))
+               (with-timeout (10 (error "The client made no input context"))
+                 (while (zerop (hash-table-count ewm-xim--ics))
+                   (ewm-xim-tests--pump 0.05)))
+               ,@body)
+           (when (process-live-p ewm-xim-tests--client)
+             (delete-process ewm-xim-tests--client))
+           (kill-buffer (process-buffer ewm-xim-tests--client))
+           (xcb:disconnect ewm-xim-tests--xtest)
+           (kill-buffer surface))))))
+
+(defmacro ewm-xim-tests--with-skk (&rest body)
+  "Run BODY with `ewm-skk-mode' on and DDSKK in buffer `surface'."
+  (declare (indent 0))
+  `(let ((ewm-text-input-key-functions nil)
+         (ewm-text-input-surface-composer-functions nil)
+         (ewm-text-input-deactivate-hook nil)
+         (ewm-intercept-keys-filter-functions nil)
+         (ewm-skk--converting nil))
+     (ewm-skk-mode 1)
+     (unwind-protect
+         (progn
+           (with-current-buffer surface (set-input-method "japanese-skk"))
+           ,@body)
+       (ewm-skk-mode -1))))
+
 ;;; Tests
 
 (ert-deftest ewm-xim-styles-count-styles ()
@@ -319,7 +412,7 @@
   (let* ((xim:lsb t)
          (data (xcb:marshal (car (ewm-xim--attributes)))))
     ;; Attribute id, value length, then the XIMStyles count.
-    (should (equal (append (substring data 0 6) nil) '(0 0 8 0 1 0)))))
+    (should (equal (append (substring data 0 6) nil) '(0 0 12 0 2 0)))))
 
 (ert-deftest ewm-xim-lists-preedit-and-status-attributes ()
   "IC attributes Wine passes for the root-window style are listed.
@@ -502,6 +595,77 @@ libX11 fails XCreateIC on any attribute the server did not list."
               (ewm-xim-tests--pump 0.5))
             (should-not (with-current-buffer surface (ewm-skk--idle-p))))
         (ewm-skk-mode -1)))))
+
+(ert-deftest ewm-xim-offers-on-the-spot ()
+  "Both styles are offered, preedit callbacks first."
+  (skip-unless ewm-xim-tests--have-xim)
+  (let ((styles (slot-value (slot-value (car (ewm-xim--attributes)) 'value) 'styles)))
+    (should (equal styles (list ewm-xim--callback-style ewm-xim--root-style)))))
+
+(ert-deftest ewm-xim-client-draws-the-preedit ()
+  "An on-the-spot client draws the reading as it changes, then gets the commit."
+  (skip-unless ewm-xim-tests--have-skk)
+  (ewm-xim-tests--with-xim-client "callbacks"
+    (should (= (ewm-xim--ic-style (car (hash-table-values ewm-xim--ics)))
+               ewm-xim--callback-style))
+    (ewm-xim-tests--with-skk
+      (ewm-xim-tests--press "Ni")
+      (should (ewm-xim-tests--wait-line "draw 2 0 2 ▽に"))
+      (ewm-xim-tests--press "hon" ?\s)
+      (should (ewm-xim-tests--wait-line "draw 3 0 4 ▼日本"))
+      (ewm-xim-tests--press 'return)
+      (should (ewm-xim-tests--wait-line "commit 日本"))
+      ;; Nothing in the echo area, and the preedit ends before the commit.
+      (should (equal ewm-xim--preedit ""))
+      (let ((lines (seq-remove (lambda (line) (string-prefix-p "key " line))
+                               (ewm-xim-tests--client-lines))))
+        (should (equal (car lines) "start"))
+        (should (equal (last lines 3) '("draw 0 0 3 " "done" "commit 日本")))))))
+
+(ert-deftest ewm-xim-client-unfocus-ends-the-preedit ()
+  "A field losing focus mid-conversion has its preedit ended."
+  (skip-unless ewm-xim-tests--have-skk)
+  (ewm-xim-tests--with-xim-client "callbacks"
+    (ewm-xim-tests--with-skk
+      (ewm-xim-tests--press "Ni")
+      (should (ewm-xim-tests--wait-line "draw 2 0 2 ▽に"))
+      (ewm-xim-tests--focus ewm-xim-tests--xtest xcb:InputFocus:None)
+      (should (ewm-xim-tests--wait-line "done"))
+      (should-not (ewm-xim--ic-preedit (car (hash-table-values ewm-xim--ics)))))))
+
+(ert-deftest ewm-xim-client-root-style-uses-the-echo-area ()
+  "A root-window client gets no preedit callbacks."
+  (skip-unless ewm-xim-tests--have-skk)
+  (ewm-xim-tests--with-xim-client "root"
+    (ewm-xim-tests--with-skk
+      (ewm-xim-tests--press "Ni")
+      (should (equal ewm-xim--preedit "▽に"))
+      (ewm-xim-tests--press 'return)
+      (should (ewm-xim-tests--wait-line "commit に"))
+      (should-not (member "start" (ewm-xim-tests--client-lines))))))
+
+(ert-deftest ewm-xim-client-types-quail ()
+  "A quail input method composes for an XIM client too."
+  (skip-unless ewm-xim-tests--client-binary)
+  (ewm-xim-tests--with-xim-client "callbacks"
+    (let ((ewm-text-input-key-functions nil)
+          (ewm-text-input-surface-composer-functions nil))
+      (with-current-buffer surface (activate-input-method "latin-1-postfix"))
+      ;; Batch quail reads its later keys from the queue, not from stdin,
+      ;; so they are all in before it starts.  Batch has no redisplay,
+      ;; hence no preedit.
+      (cl-letf (((symbol-function 'ewm-xim-tests--pump)
+                 (lambda (seconds)
+                   (let ((end (+ (float-time) seconds)))
+                     (while (< (float-time) end)
+                       (accept-process-output nil 0.02))))))
+        (ewm-xim-tests--press "a'b"))
+      (should (equal (mapcar #'car-safe unread-command-events)
+                     '(ewm-text-input-key no-record no-record)))
+      (let ((last-input-event (pop unread-command-events)))
+        (ewm-text-input--compose))
+      (should (ewm-xim-tests--wait-line "commit á"))
+      (should (ewm-xim-tests--wait-line "commit b")))))
 
 (ert-deftest ewm-xim-xterm-client-goes-away ()
   "A client that exits leaves no client or input context behind."

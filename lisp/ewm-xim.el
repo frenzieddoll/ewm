@@ -17,19 +17,22 @@
 ;; The server takes the "@server=NAME" selection and lists it in the root
 ;; window's XIM_SERVERS, then answers the LOCALES and TRANSPORT queries a
 ;; client makes before connecting.  Like EXWM it offers transport 0.0 over
-;; the X connection, static event flow and the root-window style only: the
-;; client forwards every key press, and the server types it back or
-;; commits text in its place.
+;; the X connection and static event flow: the client forwards every key
+;; press, and the server types it back or commits text in its place.
 ;;
 ;; A forwarded key is answered at once, so the client never waits on Emacs,
 ;; and becomes a compositor key event for the focused surface.  When that
 ;; surface's buffer has an input method (or a composer such as ewm-skk) the
 ;; event goes through `ewm--handle-key' like a text-input key; what the
 ;; method commits, shows as preedit or hands back then returns over XIM, by
-;; `ewm-text-input-client-functions'.  Other keys go straight back.  The
-;; root-window style has no preedit in the client, so it shows in the echo
-;; area.  A field losing focus runs `ewm-text-input-deactivate-hook', as a
-;; text-input field does, so its unconfirmed text is dropped.
+;; `ewm-text-input-client-functions'.  Other keys go straight back.
+;;
+;; Two input styles are offered.  On-the-spot (preedit callbacks), which
+;; GTK and Wine pick, has the client draw the preedit in its field as it
+;; changes.  The root-window style, xterm's, has no place for it in the
+;; client, so it shows in the echo area.  A field losing focus runs
+;; `ewm-text-input-deactivate-hook', as a text-input field does, so its
+;; unconfirmed text is dropped.
 ;;
 ;; xwayland-satellite starts on the first X connection, and connecting here
 ;; is one: the server brings Xwayland up when EWM is ready, so clients find
@@ -101,13 +104,22 @@ C,no"
 (defvar ewm-xim--connected-at nil
   "When `ewm-xim--conn' was made.")
 
+(defconst ewm-xim--root-style
+  (logior xlib:XIMPreeditNothing xlib:XIMStatusNothing)
+  "The root-window style: the server shows the preedit.")
+
+(defconst ewm-xim--callback-style
+  (logior xlib:XIMPreeditCallbacks xlib:XIMStatusNothing)
+  "The on-the-spot style: the client draws the preedit it is sent.")
+
 (cl-defstruct (ewm-xim--client (:constructor ewm-xim--client-create))
   "An XIM client, talking to the server through its own window pair."
   server-xwin client-xwin lsb)
 
 (cl-defstruct (ewm-xim--ic (:constructor ewm-xim--ic-create))
-  "An input context of CLIENT."
-  client im-id ic-id)
+  "An input context of CLIENT, in input STYLE.
+PREEDIT is the length of the preedit drawn in the client, nil when none."
+  client im-id ic-id (style ewm-xim--root-style) preedit)
 
 (cl-defstruct (ewm-xim--key (:constructor ewm-xim--key-create))
   "A key press IC forwarded: its serial number and raw EVENT bytes."
@@ -343,25 +355,41 @@ libX11 checks the count against the value's length and rejects it."
              (substring data 2))))
 
 (defun ewm-xim--attributes ()
-  "The one attribute value the server reports: root-window style only."
+  "The one attribute value the server reports: its input styles."
   (list (make-instance 'xim:XIMATTRIBUTE
                        :id 0
                        :length nil
                        :value (make-instance
                                'ewm-xim--styles
                                :number nil
-                               :styles (list (logior xlib:XIMPreeditNothing
-                                                     xlib:XIMStatusNothing))))))
+                               :styles (list ewm-xim--callback-style
+                                             ewm-xim--root-style)))))
 
-(defun ewm-xim--ic-values (ids)
+(defun ewm-xim--requested-style (attributes)
+  "The input style the IC ATTRIBUTES ask for, else the root-window style."
+  (let ((unpack (if xim:lsb #'xcb:-unpack-u4-lsb #'xcb:-unpack-u4))
+        (id (cl-position xlib:XNInputStyle ewm-xim--ic-attr-table
+                         :key #'car :test #'equal)))
+    (or (cl-loop for attr in attributes
+                 for value = (vconcat (slot-value attr 'value))
+                 when (and (= (slot-value attr 'id) id) (= (length value) 4))
+                 return (funcall unpack value 0))
+        ewm-xim--root-style)))
+
+(defun ewm-xim--callbacks-p (ic)
+  "Non-nil when the client of IC draws its preedit."
+  (/= 0 (logand (ewm-xim--ic-style ic) xlib:XIMPreeditCallbacks)))
+
+(defun ewm-xim--ic-values (ids &optional style)
   "Values of the IC attributes IDS that the server keeps: the input
-style and the events to filter.  Others are left out."
+STYLE (by default the root-window style) and the events to filter.
+Others are left out."
   (let ((pack (if xim:lsb #'xcb:-pack-u4-lsb #'xcb:-pack-u4)))
     (cl-loop for id in ids
              for name = (car (nth id ewm-xim--ic-attr-table))
              for value = (pcase name
                            ((pred (equal xlib:XNInputStyle))
-                            (logior xlib:XIMPreeditNothing xlib:XIMStatusNothing))
+                            (or style ewm-xim--root-style))
                            ("filterEvents"
                             (logior xcb:EventMask:KeyPress xcb:EventMask:KeyRelease)))
              when value
@@ -567,12 +595,14 @@ style and the events to filter.  Others are left out."
               replies)))
      ((= opcode xim:opcode:create-ic)
       (let ((req (ewm-xim--parse 'xim:create-ic data)))
-        ;; The IC attributes need no keeping for the root-window style.
+        ;; Of the IC attributes only the style matters.
         (setq ewm-xim--ic-id (ewm-xim--next-id ewm-xim--ic-id))
         (puthash ewm-xim--ic-id
                  (ewm-xim--ic-create :client client
                                      :im-id (slot-value req 'im-id)
-                                     :ic-id ewm-xim--ic-id)
+                                     :ic-id ewm-xim--ic-id
+                                     :style (ewm-xim--requested-style
+                                             (slot-value req 'ic-attributes)))
                  ewm-xim--ics)
         (push (make-instance 'xim:create-ic-reply
                              :im-id (slot-value req 'im-id)
@@ -592,13 +622,15 @@ style and the events to filter.  Others are left out."
                              :ic-id (slot-value req 'ic-id))
               replies)))
      ((= opcode xim:opcode:get-ic-values)
-      (let ((req (ewm-xim--parse 'xim:get-ic-values data)))
+      (let* ((req (ewm-xim--parse 'xim:get-ic-values data))
+             (ic (gethash (slot-value req 'ic-id) ewm-xim--ics)))
         (push (make-instance 'xim:get-ic-values-reply
                              :im-id (slot-value req 'im-id)
                              :ic-id (slot-value req 'ic-id)
                              :length nil
                              :ic-attributes (ewm-xim--ic-values
-                                             (slot-value req 'ic-attributes-id)))
+                                             (slot-value req 'ic-attributes-id)
+                                             (and ic (ewm-xim--ic-style ic))))
               replies)))
      ((= opcode xim:opcode:set-ic-focus)
       ;; Keys name their IC, and the focused surface names the buffer.
@@ -614,9 +646,14 @@ style and the events to filter.  Others are left out."
                              :im-id (slot-value req 'im-id)
                              :ic-id (slot-value req 'ic-id))
               replies)))
-     ((memq opcode (list xim:opcode:sync-reply xim:opcode:error)))
+     ((memq opcode (list xim:opcode:sync-reply xim:opcode:error
+                         xim:opcode:preedit-start-reply
+                         xim:opcode:preedit-caret-reply)))
      ((= opcode xim:opcode:reset-ic)
-      (let ((req (ewm-xim--parse 'xim:reset-ic data)))
+      (let* ((req (ewm-xim--parse 'xim:reset-ic data))
+             (ic (gethash (slot-value req 'ic-id) ewm-xim--ics)))
+        ;; The client clears its preedit itself.
+        (when ic (setf (ewm-xim--ic-preedit ic) nil))
         (push (make-instance 'xim:reset-ic-reply
                              :im-id (slot-value req 'im-id)
                              :ic-id (slot-value req 'ic-id)
@@ -624,7 +661,7 @@ style and the events to filter.  Others are left out."
                              :string "")
               replies)))
      (t
-      ;; Preedit and string conversion replies included: none was asked for.
+      ;; String conversion replies included: none was asked for.
       (push (ewm-xim--error) replies)))
     (dolist (reply (nreverse replies))
       (ewm-xim--send reply client))
@@ -694,7 +731,7 @@ minibuffer took the focus."
                                    using (hash-values i)
                                    when (eq i ic) return id))
               ((not (eql ewm-text-input--composing surface-id))))
-    (ewm-xim--show-preedit "")
+    (ewm-xim--preedit ic "")
     (run-hooks 'ewm-text-input-deactivate-hook)))
 
 (defun ewm-xim--live-p (ic)
@@ -742,6 +779,49 @@ minibuffer took the focus."
     (let ((message-log-max nil))
       (if (string-empty-p text) (message nil) (message "%s" text)))))
 
+(defun ewm-xim--draw-preedit (ic text)
+  "Have the client of IC draw TEXT, underlined, as its whole preedit.
+Empty TEXT ends the preedit."
+  (let ((old (ewm-xim--ic-preedit ic))
+        (empty (string-empty-p text)))
+    (when (and (ewm-xim--live-p ic) (not (and empty (null old))))
+      (let* ((client (ewm-xim--ic-client ic))
+             (xim:lsb (ewm-xim--client-lsb client))
+             (im-id (ewm-xim--ic-im-id ic))
+             (ic-id (ewm-xim--ic-ic-id ic))
+             (string (encode-coding-string text 'compound-text-with-extensions))
+             (length (length text)))
+        (unless old
+          (ewm-xim--send (make-instance 'xim:preedit-start :im-id im-id :ic-id ic-id)
+                         client))
+        ;; Lengths and positions count characters.
+        (ewm-xim--send (make-instance 'xim:preedit-draw
+                                      :im-id im-id
+                                      :ic-id ic-id
+                                      :caret length
+                                      :chg-first 0
+                                      :chg-length (or old 0)
+                                      :status (if empty
+                                                  (logior xim:preedit-draw-status:no-string
+                                                          xim:preedit-draw-status:no-feedback)
+                                                0)
+                                      :string-length (length string)
+                                      :string string
+                                      :feedback-length (* 4 length)
+                                      :feedback (make-list length xim:underline))
+                       client)
+        (when empty
+          (ewm-xim--send (make-instance 'xim:preedit-done :im-id im-id :ic-id ic-id)
+                         client))
+        (setf (ewm-xim--ic-preedit ic) (and (not empty) length))
+        (xcb:flush ewm-xim--conn)))))
+
+(defun ewm-xim--preedit (ic text)
+  "Show TEXT as the preedit of IC: in the client if it draws one."
+  (if (ewm-xim--callbacks-p ic)
+      (ewm-xim--draw-preedit ic text)
+    (ewm-xim--show-preedit text)))
+
 (defun ewm-xim--deliver (op arg surface-id)
   "Send OP with ARG over XIM when it belongs to an XIM client.
 For `ewm-text-input-client-functions'."
@@ -754,9 +834,9 @@ For `ewm-text-input-client-functions'."
      (when-let* ((ic (gethash surface-id ewm-xim--surface-ics)))
        (if (not (ewm-xim--live-p ic))
            (progn (remhash surface-id ewm-xim--surface-ics) nil)
-         (if (eq op 'commit)
-             (progn (ewm-xim--show-preedit "") (ewm-xim--commit ic arg))
-           (ewm-xim--show-preedit arg))
+         ;; A commit replaces the preedit.
+         (ewm-xim--preedit ic (if (eq op 'commit) "" arg))
+         (when (eq op 'commit) (ewm-xim--commit ic arg))
          t)))))
 
 ;;; Lifecycle
