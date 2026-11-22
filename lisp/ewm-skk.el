@@ -201,8 +201,10 @@ KEY, compositor key RAW, is the key DDSKK just ran."
 
 (defun ewm-skk--lifted-p (spec)
   "Non-nil when intercept SPEC must reach DDSKK in the converting surface.
-That is every emulation in its scope, and `ewm-mode-map' keys it binds
-to DDSKK commands."
+That is every emulation in its scope, `ewm-mode-map' keys it binds to
+DDSKK commands, and `ewm-mode-map' keys its emulations shadow: with the
+emulation lifted, C-h would otherwise take the keyboard to Emacs, and the
+client would keep its preedit as typed text."
   (when-let* ((buf ewm-skk--converting)
               ((buffer-live-p buf)))
     (let ((dispatch (plist-get spec :dispatch))
@@ -210,10 +212,11 @@ to DDSKK commands."
       (if (eq (car-safe dispatch) 'emulate)
           (or (null surface)
               (eql surface (buffer-local-value 'ewm-surface-id buf)))
-        (and (eq dispatch 'command)
-             (when-let* ((key (ewm--key-event (plist-get spec :description))))
-               (with-current-buffer buf
-                 (ewm-skk--skk-command-p (ewm-skk--binding key)))))))))
+        (when-let* ((key (ewm--key-event (plist-get spec :description))))
+          (with-current-buffer buf
+            (or (ewm-skk--emulation key)
+                (and (eq dispatch 'command)
+                     (ewm-skk--skk-command-p (ewm-skk--binding key))))))))))
 
 ;;; Running keys
 
